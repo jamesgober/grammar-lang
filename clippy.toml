@@ -1,2 +1,7 @@
 avoid-breaking-exported-api = true
-msrv = "1.87"
+msrv = "1.85"
+# The crate denies `unwrap`, `expect`, and `panic` in library code; inside
+# `#[cfg(test)]` modules they are how a failing assertion is spelled.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
