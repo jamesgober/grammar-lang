@@ -10,7 +10,7 @@ Compiles, CI green, structure correct, no domain logic.
 - [x] Manifest, README, CHANGELOG, REPS, dual license, CI, deny, clippy, rustfmt.
 
 ## v0.2.0 - Core (DONE)
-Grammar description plus the parser-generator core - the LexerSketch substrate.
+Grammar description plus the parser-generator core - the toolchain's substrate.
 Dependencies (wires token, lexer, ast, parser, diag) are wired here, when first used.
 Exit criteria:
 - [x] Every public item has rustdoc + a runnable example.
