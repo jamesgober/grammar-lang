@@ -5,7 +5,7 @@ use core::{fmt, iter::FusedIterator};
 
 use token_lang::{Span, Token};
 
-use crate::lex::Dfa;
+use crate::lex::{Dfa, Memo};
 use crate::lr::table::{ACCEPT, REDUCE, SHIFT};
 use crate::tree::{Tree, TreeBuilder};
 use crate::{Kind, ParseError};
@@ -411,8 +411,9 @@ impl Parser {
         let mut values: Vec<A::Value> = Vec::with_capacity(32);
         let mut pos = 0usize;
         let mut last_end = 0u32;
+        let mut memo = Memo::default();
 
-        let (mut term, mut span) = match self.next_parsed(bytes, &mut pos) {
+        let (mut term, mut span) = match self.next_parsed(bytes, &mut pos, &mut memo) {
             Some(lookahead) => lookahead,
             None => return Err(self.unrecognized(text, pos, Some(&[0]))),
         };
@@ -425,7 +426,7 @@ impl Parser {
                     values.push(actions.token(Token::new(Kind::token(term, false), span), slice));
                     stack.push((action >> 2, span));
                     last_end = span.end().to_u32();
-                    (term, span) = match self.next_parsed(bytes, &mut pos) {
+                    (term, span) = match self.next_parsed(bytes, &mut pos, &mut memo) {
                         Some(lookahead) => lookahead,
                         None => {
                             let states: Vec<u32> = stack.iter().map(|&(s, _)| s).collect();
@@ -505,6 +506,7 @@ impl Parser {
             parser: self,
             text,
             pos: 0,
+            memo: Memo::default(),
         }
     }
 
@@ -573,14 +575,14 @@ impl Parser {
     /// The next parsed token at or after `*pos` — skipped tokens passed over
     /// — as `(terminal, span)`; end of input is the terminal after the last
     /// token, with an empty span. `None` means no token matches at `*pos`.
-    #[inline]
-    fn next_parsed(&self, bytes: &[u8], pos: &mut usize) -> Option<(u32, Span)> {
+    #[inline(always)]
+    fn next_parsed(&self, bytes: &[u8], pos: &mut usize, memo: &mut Memo) -> Option<(u32, Span)> {
         loop {
             let start = *pos;
             if start >= bytes.len() {
                 return Some((self.parsed, Span::empty(start as u32)));
             }
-            let (len, token) = self.dfa.longest_match(&bytes[start..]);
+            let (len, token) = self.dfa.longest_match_at(bytes, start, memo);
             if len == 0 {
                 return None;
             }
@@ -605,7 +607,8 @@ impl Parser {
         let nonterms = self.nonterms as usize;
         let mut states = vec![0u32];
         let mut pos = 0;
-        let Some((mut term, mut span)) = self.next_parsed(bytes, &mut pos) else {
+        let mut memo = Memo::default();
+        let Some((mut term, mut span)) = self.next_parsed(bytes, &mut pos, &mut memo) else {
             return states;
         };
         while span.start().to_usize() < at {
@@ -614,7 +617,7 @@ impl Parser {
             match action & 3 {
                 SHIFT => {
                     states.push(action >> 2);
-                    match self.next_parsed(bytes, &mut pos) {
+                    match self.next_parsed(bytes, &mut pos, &mut memo) {
                         Some(lookahead) => (term, span) = lookahead,
                         None => break,
                     }
@@ -835,11 +838,23 @@ impl fmt::Debug for Parser {
 /// Yields `Ok` for each token, skipped tokens included, and `Err` for each
 /// character no token matches, then resumes after it. Fused: once it returns
 /// `None` it always does.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Tokens<'a> {
     parser: &'a Parser,
     text: &'a str,
     pos: usize,
+    /// Scan states already known to lead nowhere, so the pass stays linear.
+    memo: Memo,
+}
+
+impl fmt::Debug for Tokens<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tokens")
+            .field("parser", &self.parser)
+            .field("text", &self.text)
+            .field("pos", &self.pos)
+            .finish()
+    }
 }
 
 impl Iterator for Tokens<'_> {
@@ -854,10 +869,10 @@ impl Iterator for Tokens<'_> {
             self.pos = self.text.len();
             return Some(Err(self.parser.too_large(self.text.len())));
         }
-        let (len, token) = self
-            .parser
-            .dfa
-            .longest_match(&self.text.as_bytes()[start..]);
+        let (len, token) =
+            self.parser
+                .dfa
+                .longest_match_at(self.text.as_bytes(), start, &mut self.memo);
         if len == 0 {
             let err = self.parser.unrecognized(self.text, start, None);
             self.pos = err.span().end().to_usize();

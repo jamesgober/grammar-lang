@@ -20,6 +20,7 @@
 //! 0, and reaching it ends a scan.
 
 use alloc::{boxed::Box, vec, vec::Vec};
+use core::fmt;
 
 use super::nfa::{Nfa, State};
 use crate::util::SliceMap;
@@ -70,14 +71,172 @@ pub(crate) struct Dfa {
     start: u32,
 }
 
+/// Scan states known to lead to no token, for one left-to-right pass over
+/// one text; see [`Dfa::longest_match_at`].
+///
+/// The pairs live in a window of positions that starts at or before the
+/// current scan. When a scan starts past the whole window, the window is
+/// emptied, so on ordinary input the memo stays a few entries long.
+#[derive(Clone, Default)]
+pub(crate) struct Memo {
+    /// The absolute position of `heads[0]`.
+    base: usize,
+    /// Per position from `base`: one more than the index in `marks` of the
+    /// newest pair at that position, or 0 for none.
+    heads: Vec<u32>,
+    /// Each remembered pair as `(row, link)`, where `link` is one more than
+    /// the index of the next pair at the same position, or 0.
+    marks: Vec<(u32, u32)>,
+    /// Transitions taken so far, for the linearity tests.
+    #[cfg(test)]
+    pub(crate) steps: usize,
+}
+
+impl Memo {
+    /// Prepares for a scan at `start`, and returns how far past `start`
+    /// the window reaches: only states up to there can be remembered.
+    #[inline(always)]
+    fn watch(&mut self, start: usize) -> usize {
+        let end = self.base + self.heads.len();
+        if start < end {
+            return end - start;
+        }
+        // The window is wholly behind the scan, which can never reach it.
+        if !self.heads.is_empty() {
+            self.heads.clear();
+            self.marks.clear();
+        }
+        0
+    }
+
+    /// Whether `(row, at)` is remembered as leading to no token.
+    #[inline(never)]
+    fn failed(&self, row: usize, at: usize) -> bool {
+        let Some(&head) = at.checked_sub(self.base).and_then(|i| self.heads.get(i)) else {
+            return false;
+        };
+        let mut link = head;
+        while let Some(&(r, next)) = self.marks.get((link as usize).wrapping_sub(1)) {
+            if r as usize == row {
+                return true;
+            }
+            link = next;
+        }
+        false
+    }
+
+    /// Remembers that `(row, at)` leads to no token. `at` is past the start
+    /// of the current scan, so it is inside or after the window.
+    fn mark(&mut self, row: u32, at: usize) {
+        // The memo only saves time; past `u32::MAX` pairs it stops growing
+        // and later scans simply run to their end.
+        let Ok(link) = u32::try_from(self.marks.len() + 1) else {
+            return;
+        };
+        if self.heads.is_empty() {
+            self.base = at;
+        }
+        let Some(i) = at.checked_sub(self.base) else {
+            return;
+        };
+        if i >= self.heads.len() {
+            self.heads.resize(i + 1, 0);
+        }
+        self.marks.push((row, self.heads[i]));
+        self.heads[i] = link;
+    }
+}
+
+impl fmt::Debug for Memo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Memo")
+            .field("base", &self.base)
+            .field("marks", &self.marks.len())
+            .finish()
+    }
+}
+
 impl Dfa {
     /// The longest prefix of `bytes` some token matches, as `(length,
     /// token)`; the length is 0 when no prefix matches.
+    #[cfg(test)]
+    pub(crate) fn longest_match(&self, bytes: &[u8]) -> (usize, u32) {
+        self.longest_match_at(bytes, 0, &mut Memo::default())
+    }
+
+    /// The longest token match starting at `text[start..]`, as `(length,
+    /// token)`; the length is 0 when no prefix matches. `start` must be at
+    /// most `text.len()`.
     ///
     /// Patterns are UTF-8 automata, so on `str` input every match ends on a
     /// character boundary.
-    #[inline]
-    pub(crate) fn longest_match(&self, bytes: &[u8]) -> (usize, u32) {
+    ///
+    /// Longest match can read far past the token it returns: an unclosed
+    /// block comment scans to the end of the input before the scan falls
+    /// back to a shorter token. Scanning again from every later start would
+    /// make lexing quadratic, so `memo` remembers each `(row, position)` pair
+    /// a scan passed through after its last accept. No accept is reachable
+    /// from such a pair, so a later scan that enters one stops there with
+    /// the match it already has. Every pair is remembered at most once and
+    /// every scan either consumes its token or stops at a remembered pair,
+    /// so a whole pass over the text makes `O(rows * len)` transitions in
+    /// the worst case and about `len` on ordinary input. Calls on one `memo`
+    /// must come in order of non-decreasing `start`, as a lexing pass makes
+    /// them.
+    #[inline(always)]
+    pub(crate) fn longest_match_at(
+        &self,
+        text: &[u8],
+        start: usize,
+        memo: &mut Memo,
+    ) -> (usize, u32) {
+        let table = &*self.table;
+        let bytes = text.get(start..).unwrap_or_default();
+        // States up to this far past `start` may be remembered; everything
+        // past it is unexplored.
+        let watch = memo.watch(start);
+        let (best_len, best_row, last_row) = if watch == 0 {
+            let found = self.scan(bytes);
+            // The plain scan reads its match, one byte more, and any dead
+            // end, which `remember` counts again as it walks it.
+            #[cfg(test)]
+            {
+                memo.steps += found.0 + 1;
+            }
+            found
+        } else {
+            self.scan_checked(bytes, start, watch, memo)
+        };
+        // An accepting row is entered only by an accept, so the scan read
+        // past its match exactly when it stopped in another row. With no
+        // match, look at the first step instead: the start row may be
+        // entered again.
+        let dead_end = if best_len != 0 {
+            last_row != best_row
+        } else {
+            bytes.first().is_some_and(|&b| {
+                table[self.start as usize + self.columns[b as usize] as usize] != 0
+            })
+        };
+        if dead_end {
+            let row = if best_len == 0 {
+                self.start as usize
+            } else {
+                best_row
+            };
+            self.remember(bytes, start, best_len, row, memo);
+        }
+        if best_len == 0 {
+            return (0, 0);
+        }
+        (best_len, table[best_row].wrapping_sub(1))
+    }
+
+    /// The longest-match scan: the length of the longest token prefix of
+    /// `bytes` and the row it ends in, or `(0, 0)`, then the row the scan
+    /// stopped in.
+    #[inline(always)]
+    fn scan(&self, bytes: &[u8]) -> (usize, usize, usize) {
         let table = &*self.table;
         let mut row = self.start as usize;
         let (mut best_len, mut best_row) = (0, 0);
@@ -95,10 +254,70 @@ impl Dfa {
                 }
             }
         }
-        if best_len == 0 {
-            return (0, 0);
+        (best_len, best_row, row)
+    }
+
+    /// [`scan`](Self::scan) for a start inside the memo's window: it also
+    /// stops at the first remembered state within `watch` bytes, since no
+    /// longer match lies past one.
+    #[cold]
+    #[inline(never)]
+    fn scan_checked(
+        &self,
+        bytes: &[u8],
+        start: usize,
+        watch: usize,
+        memo: &mut Memo,
+    ) -> (usize, usize, usize) {
+        let table = &*self.table;
+        let mut row = self.start as usize;
+        let (mut best_len, mut best_row) = (0, 0);
+        for (i, &byte) in bytes.iter().enumerate() {
+            let next = table[row + self.columns[byte as usize] as usize];
+            if next == 0 {
+                break;
+            }
+            row = (next & OFFSET) as usize;
+            #[cfg(test)]
+            {
+                memo.steps += 1;
+            }
+            if next & ACCEPTING != 0 {
+                best_len = i + 1;
+                best_row = row;
+                if next & FINAL != 0 {
+                    break;
+                }
+            } else if i < watch && memo.failed(row, start + i + 1) {
+                break;
+            }
         }
-        (best_len, table[best_row].wrapping_sub(1))
+        (best_len, best_row, row)
+    }
+
+    /// Walks the dead end after a match of `len` bytes, from `row`, and
+    /// remembers every state on it, stopping at the dead state, the end of
+    /// the input, or a state already remembered.
+    #[cold]
+    #[inline(never)]
+    fn remember(&self, bytes: &[u8], start: usize, len: usize, mut row: usize, memo: &mut Memo) {
+        let table = &*self.table;
+        for (i, &byte) in bytes.iter().enumerate().skip(len) {
+            let next = table[row + self.columns[byte as usize] as usize];
+            if next == 0 {
+                break;
+            }
+            row = (next & OFFSET) as usize;
+            let at = start + i + 1;
+            if memo.failed(row, at) {
+                break;
+            }
+            memo.mark(row as u32, at);
+            #[cfg(test)]
+            {
+                memo.steps += 2;
+            }
+        }
     }
 
     /// The number of rows, the dead state included.
