@@ -13,6 +13,54 @@
 
 ---
 
+## [1.0.1] - 2026-11-12
+
+A patch release. The public API is unchanged.
+
+### Fixed
+
+- **Lexing is now linear in the input on every text.** Longest match can
+  read far past the token it finally returns: with a block-comment pattern
+  and a `/` literal, an unclosed `/*` scans to the end of the input before
+  the lexer settles on `/`. Every later `/` did the same scan again, so a
+  file of unclosed comment openers lexed in quadratic time. 240 KB of `/* `
+  took about 20 seconds in `tokens` and in `parse`. The lexer now remembers
+  each DFA state and position a scan passed through after its last match,
+  since no token can be found from there, and a later scan that reaches one
+  stops at once. Each pair is remembered once, so the pass is linear: the
+  same 240 KB now takes about 30 ms, and 3 MB well under a second. Ordinary
+  input, where no scan runs past its token, never adds to the memo. `parse`,
+  `parse_with` and `tokens` all use it, and so does the replay behind error
+  messages.
+- **`parse` no longer reserves memory in proportion to a huge input.** The
+  tree builder reserved about 8 bytes per input byte before reading the
+  first token, so a 100 MB input committed about 800 MB even when it failed
+  on the first byte. The up-front reservation is now capped at about 24 MiB
+  and the tree grows as it is built. Inputs under about 3 MB are unaffected.
+
+### Changed
+
+- The memo check costs a little on ordinary input. In a tight loop over
+  `tokens`, short-token input is about 5 to 10% slower and the 1 MiB JSON
+  benchmark about 50% slower (2.2 ms to 3.3 ms). `parse` on the same JSON is
+  about 10% slower, and less on inputs dominated by short tokens.
+- The README no longer says the parser is fuzzed. It is not; arbitrary text
+  goes through it in property tests, which check that it never panics and
+  that the tokens tile the input.
+- The lexer section of `docs/API.md` explains that longest match can look
+  ahead without bound, so a grammar whose patterns back off does not meet
+  incremental-lang's rule that a token's end depends on at most one
+  character after it.
+
+### Added
+
+- Tests that lex a megabyte of unclosed comment openers and of a pattern
+  with a long dead end under a deadline, a transition count that must stay
+  linear, and a property test that checks every token stream against a
+  brute-force longest match.
+
+---
+
 ## [1.0.0] - 2026-10-07
 
 The API freeze. The 0.2.0 surface is now the stable `1.x` contract; the code
@@ -120,7 +168,8 @@ Initial scaffold and repository bootstrap. No domain logic yet &mdash; this rele
 - `.github/workflows/ci.yml` CI matrix; `deny.toml`, `clippy.toml`, `rustfmt.toml`.
 - `dev/DIRECTIVES.md` and `dev/ROADMAP.md` (committed engineering standards + plan).
 
-[Unreleased]: https://github.com/jamesgober/grammar-lang/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/jamesgober/grammar-lang/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/jamesgober/grammar-lang/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/jamesgober/grammar-lang/compare/v0.2.0...v1.0.0
 [0.2.0]: https://github.com/jamesgober/grammar-lang/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jamesgober/grammar-lang/releases/tag/v0.1.0

@@ -142,6 +142,14 @@ special handling: with `literal("if")` and `pattern("ident", "[a-z]+")`, the
 text `if` is the keyword and `iffy` is an identifier, whichever was declared
 first.
 
+Longest match can read past the token it returns: with a block-comment
+pattern and a `/` literal, an unclosed `/*` scans to the end of the input
+before the lexer settles on `/`. The lexer remembers where such scans ran
+into a dead end and never repeats them, so lexing stays linear in the input
+on any text. The lookahead itself is still unbounded, so a grammar whose
+patterns can back off like this does not meet incremental-lang's lexer rule
+that where a token ends may depend on at most one character after it.
+
 Skipped tokens can appear between any two tokens and never reach the parser
 or the tree; [`Parser::tokens`](#parsertokens) still reports them, with
 [`is_trivia`](#kind) set.

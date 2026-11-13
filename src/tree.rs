@@ -394,6 +394,11 @@ impl fmt::Debug for Node<'_> {
     }
 }
 
+/// The most nodes [`TreeBuilder::new`] reserves room for up front, about
+/// 24 MiB with the child list. Inputs up to about 3 MB get their whole
+/// estimate; larger ones grow past it as they parse.
+const RESERVE_LIMIT: usize = 1 << 20;
+
 /// The [`Actions`] behind [`Parser::parse`].
 pub(crate) struct TreeBuilder {
     nodes: Vec<NodeData>,
@@ -404,8 +409,10 @@ impl TreeBuilder {
     /// A builder for input of `len` bytes.
     pub(crate) fn new(len: usize) -> Self {
         // About one node per three bytes of typical source; a cheap estimate
-        // that saves most of the regrowth on large inputs.
-        let estimate = len / 3 + 8;
+        // that saves most of the early regrowth. It is capped so that a large
+        // input which fails on its first token does not reserve memory in
+        // proportion to its length; past the cap the vectors grow as needed.
+        let estimate = (len / 3).min(RESERVE_LIMIT) + 8;
         Self {
             nodes: Vec::with_capacity(estimate),
             children: Vec::with_capacity(estimate),

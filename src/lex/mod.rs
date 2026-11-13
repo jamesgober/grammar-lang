@@ -12,8 +12,8 @@ mod utf8;
 
 use alloc::vec::Vec;
 
-pub(crate) use dfa::Dfa;
 use dfa::DfaError;
+pub(crate) use dfa::{Dfa, Memo};
 use regex::Hir;
 
 /// One token to compile.
@@ -177,5 +177,68 @@ mod tests {
             build_err(&["((a{1000}){1000}){2}"]),
             LexError::PatternTooLarge(0)
         );
+    }
+
+    /// Lexes all of `text` in one pass, as the parser does, and returns the
+    /// tokens with the number of transitions taken.
+    fn pass(dfa: &Dfa, text: &str) -> (Vec<(u32, String)>, usize) {
+        let mut memo = Memo::default();
+        let mut out = vec![];
+        let mut pos = 0;
+        while pos < text.len() {
+            let (len, token) = dfa.longest_match_at(text.as_bytes(), pos, &mut memo);
+            assert!(len > 0, "stuck at {pos} in {text:?}");
+            out.push((token, text[pos..pos + len].to_string()));
+            pos += len;
+        }
+        (out, memo.steps)
+    }
+
+    #[test]
+    fn dead_ends_are_scanned_once() {
+        // Each `/` starts a comment that never closes, so without the memo
+        // every one of them scans to the end of the text.
+        let dfa = lexer(&["/", r"\*", " +", r"/\*([^*]|\*+[^*/])*\*+/"]);
+        for n in [1_000, 4_000, 16_000] {
+            let text = "/* ".repeat(n);
+            let (toks, steps) = pass(&dfa, &text);
+            assert_eq!(toks.len(), 3 * n);
+            assert!(
+                steps <= 6 * text.len(),
+                "{steps} steps for {} bytes",
+                text.len()
+            );
+        }
+
+        // A run with no `b` in it: every `a` looks for one.
+        let dfa = lexer(&["a", "a+b"]);
+        let text = "a".repeat(20_000);
+        let (toks, steps) = pass(&dfa, &text);
+        assert_eq!(toks.len(), 20_000);
+        assert!(
+            steps <= 6 * text.len(),
+            "{steps} steps for {} bytes",
+            text.len()
+        );
+    }
+
+    #[test]
+    fn memo_never_cuts_a_real_match() {
+        // Failed openers first, then a comment that closes: the memo from
+        // the failed scans must not stop the later one short of its end.
+        let dfa = lexer(&["/", r"\*", " +", "[0-9]+", r"/\*([^*]|\*+[^*/])*\*+/"]);
+        let mut text = String::from("1 ");
+        for _ in 0..50 {
+            text.push_str("/* 2 ");
+        }
+        text.push_str("*/ 3");
+        let (memoised, _) = pass(&dfa, &text);
+        assert_eq!(memoised, tokens(&dfa, &text));
+        assert_eq!(memoised[2], (4, text[2..text.len() - 2].to_string()));
+
+        let dfa = lexer(&["a", "a+b"]);
+        for text in ["aaab", "aaaa", "abab", "aabaa", "aaaaaaaab"] {
+            assert_eq!(pass(&dfa, text).0, tokens(&dfa, text), "{text}");
+        }
     }
 }

@@ -56,7 +56,8 @@ What it guarantees, and how each guarantee is checked:
 | The parser accepts exactly the grammar's language. | Every short input of each random grammar is checked against an Earley recognizer, and every tree against the grammar's productions. |
 | Errors point at the first bad token and list exactly what could follow. | The same property tests check the error position and the expected set against the Earley recognizer's viable prefixes. |
 | Token patterns match what they say. | Random regular expressions, Unicode included, are checked against a reference matcher. |
-| Parsing always terminates, on any input. | Grammars that can derive a rule from itself alone are refused at build time, and fuzzed input never panics. |
+| Parsing always terminates, on any input. | Grammars that can derive a rule from itself alone are refused at build time, and property tests run arbitrary text through a parser and check that it never panics. |
+| Lexing is linear in the input, even on hostile text. | Tests lex a megabyte of unclosed comment openers and count the DFA transitions, and a property test checks every token stream against a brute-force longest match. |
 
 <hr>
 <br>
@@ -271,6 +272,7 @@ Criterion writes per-benchmark reports to `target/criterion/`. Numbers vary by C
 - **Exact errors from an LALR table.** LALR(1) merges lookaheads, so its tables can report tokens that could never follow, and may reduce before noticing an error. On an error, the parser replays the input to the stack it had when the bad token arrived and asks, token by token, whether each would be shifted. The expected set is then exact, and the cost falls only on input that fails.
 - **Termination is a build-time property.** A rule that can derive itself alone makes some input infinitely ambiguous; with a precedence hiding the conflict, a table-driven parser would reduce around the cycle forever. Such grammars are refused, so every parse ends.
 - **Tokens are bytes, characters are Unicode.** Patterns are compiled to UTF-8 byte automata, so `[α-ω]` and `.` match whole characters while the scanner never decodes. Every match ends on a character boundary.
+- **Longest match without rescanning.** A longest-match scan can read far past the token it returns: an unclosed `/*` makes the comment pattern scan to the end of the input before the lexer falls back to `/`. Started again at every `/`, that is quadratic. The lexer remembers each DFA state and position a scan passed through after its last match, since no token can be found from there, and a later scan that reaches one stops at once. Each pair is remembered at most once, so the whole pass stays linear, and ordinary input never touches the memo.
 - **No recursion anywhere input reaches.** Pattern nesting is bounded, the digraph traversal behind the lookahead sets is iterative, and tree building, display, walking, and dropping are flat. A 100,000-deep nesting parses, prints, and drops without touching the stack limit.
 
 <hr>
@@ -287,7 +289,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo bench --bench bench
 ```
 
-The property tests in [`tests/properties.rs`](./tests/properties.rs) hold the generator to independent references written in the test: a canonical LR(1) construction merged by core decides which random grammars are LALR(1); an Earley recognizer decides which inputs each accepts, where the first error must be, and which tokens could follow it; a direct interpreter decides what each random pattern matches. Further properties fuzz the parser with arbitrary text and check that the token stream tiles the input exactly. Every `rust` example in this README and in [`docs/API.md`](./docs/API.md) is compiled and run as a doctest.
+The property tests in [`tests/properties.rs`](./tests/properties.rs) hold the generator to independent references written in the test: a canonical LR(1) construction merged by core decides which random grammars are LALR(1); an Earley recognizer decides which inputs each accepts, where the first error must be, and which tokens could follow it; a direct interpreter decides what each random pattern matches. Further properties run the parser on arbitrary text and check that the token stream tiles the input exactly and matches a brute-force longest match. Every `rust` example in this README and in [`docs/API.md`](./docs/API.md) is compiled and run as a doctest.
 
 <hr>
 <br>

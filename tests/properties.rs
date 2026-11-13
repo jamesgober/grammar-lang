@@ -654,6 +654,69 @@ proptest! {
     }
 }
 
+/// Maximal munch by brute force: at each position, the longest match of any
+/// pattern, ties to the earlier one, then one character as an error.
+fn reference_tokens(patterns: &[Re], text: &str) -> Vec<(Option<usize>, usize, usize)> {
+    let chars: Vec<char> = text.chars().collect();
+    let byte_at: Vec<usize> = text
+        .char_indices()
+        .map(|(i, _)| i)
+        .chain([text.len()])
+        .collect();
+    let mut out = vec![];
+    let mut pos = 0;
+    while pos < chars.len() {
+        let mut best: Option<(usize, usize)> = None;
+        for (t, re) in patterns.iter().enumerate() {
+            if let Some(&end) = re.ends(&chars, &BTreeSet::from([pos])).last() {
+                if end > pos && best.is_none_or(|(_, e)| end > e) {
+                    best = Some((t, end));
+                }
+            }
+        }
+        let (token, end) = match best {
+            Some((t, end)) => (Some(t), end),
+            None => (None, pos + 1),
+        };
+        out.push((token, byte_at[pos], byte_at[end]));
+        pos = end;
+    }
+    out
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 1000, ..ProptestConfig::default() })]
+
+    /// Lexing a whole text in one pass, where scans that already failed are
+    /// cut short, gives exactly the tokens of a brute-force longest match.
+    #[test]
+    fn tokens_match_maximal_munch(
+        patterns in proptest::collection::vec(re_strategy(), 1..4),
+        text in "[abcé\n]{0,40}",
+    ) {
+        let mut grammar = Grammar::new();
+        for (i, re) in patterns.iter().enumerate() {
+            grammar = grammar.pattern(&format!("p{i}"), &re.render());
+        }
+        let Ok(parser) = grammar.rule("s", &["p0"]).build() else {
+            // Empty or shadowed tokens: the patterns tests cover those.
+            return Ok(());
+        };
+        let ours: Vec<(Option<usize>, usize, usize)> = parser
+            .tokens(&text)
+            .map(|t| match t {
+                Ok(t) => {
+                    let name = parser.name(*t.kind());
+                    let index = name[1..].parse::<usize>().unwrap();
+                    (Some(index), t.span().start().to_usize(), t.span().end().to_usize())
+                }
+                Err(e) => (None, e.span().start().to_usize(), e.span().end().to_usize()),
+            })
+            .collect();
+        prop_assert_eq!(ours, reference_tokens(&patterns, &text));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Robustness
 // ---------------------------------------------------------------------------
